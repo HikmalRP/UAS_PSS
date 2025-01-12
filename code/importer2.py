@@ -19,6 +19,9 @@ from lms_core.models import Course, CourseMember, CourseContent, Comment
 start_time = time.time()
 filepath = './csv_data/'
 
+# Log untuk mencatat data yang gagal diproses
+invalid_log_path = 'invalid_data.log'
+
 # Import Users
 with open(filepath + 'user-data.csv') as csvfile:
     reader = csv.DictReader(csvfile)
@@ -40,39 +43,72 @@ with open(filepath + 'course-data.csv') as csvfile:
     obj_create = []
     for row in reader:
         if not Course.objects.filter(name=row['name']).exists():
-            obj_create.append(Course(
-                name=row['name'],
-                price=row['price'],
-                description=row['description'],
-                teacher=User.objects.get(pk=int(row['teacher']))
-            ))
+            try:
+                teacher = User.objects.get(pk=int(row['teacher']))
+                obj_create.append(Course(
+                    name=row['name'],
+                    price=row['price'],
+                    description=row['description'],
+                    teacher=teacher
+                ))
+            except User.DoesNotExist:
+                with open(invalid_log_path, 'a') as log_file:
+                    log_file.write(f"Invalid Teacher ID for course: {row}\n")
     Course.objects.bulk_create(obj_create)
 
 # Import Course Members
 with open(filepath + 'member-data.csv') as csvfile:
     reader = csv.DictReader(csvfile)
     obj_create = []
+    
+    # Ambil semua pasangan yang sudah ada di database
+    existing_pairs = set(CourseMember.objects.values_list('course_id', 'user_id'))
+    
     for row in reader:
-        if not CourseMember.objects.filter(course_id=int(row['course_id']), user_id=int(row['user_id'])).exists():
-            obj_create.append(CourseMember(
-                course_id=Course.objects.get(pk=int(row['course_id'])),
-                user_id=User.objects.get(pk=int(row['user_id'])),
-                roles=row['roles']
-            ))
+        course_id = int(row['course_id'])
+        user_id = int(row['user_id'])
+        pair = (course_id, user_id)
+        
+        # Pastikan pasangan tidak ada sebelum ditambahkan
+        if pair not in existing_pairs:
+            try:
+                course = Course.objects.get(pk=course_id)
+                user = User.objects.get(pk=user_id)
+                obj_create.append(CourseMember(
+                    course_id=course,
+                    user_id=user,
+                    roles=row['roles']
+                ))
+                
+                # Tambahkan pasangan ke existing_pairs untuk menghindari duplikasi lebih lanjut
+                existing_pairs.add(pair)
+            except Course.DoesNotExist:
+                with open(invalid_log_path, 'a') as log_file:
+                    log_file.write(f"Invalid Course ID for member: {row}\n")
+            except User.DoesNotExist:
+                with open(invalid_log_path, 'a') as log_file:
+                    log_file.write(f"Invalid User ID for member: {row}\n")
+
+    # Simpan data yang valid ke dalam database
     CourseMember.objects.bulk_create(obj_create)
+
 
 # Import Course Content
 with open(filepath + 'contents.json') as jsonfile:
     contents = json.load(jsonfile)
     obj_create = []
     for row in contents:
-        if not CourseContent.objects.filter(name=row['name']).exists():
+        try:
+            course = Course.objects.get(pk=int(row['course_id']))
             obj_create.append(CourseContent(
-                course_id=Course.objects.get(pk=int(row['course_id'])),
-                video_url=row['video_url'],
+                course_id=course,
                 name=row['name'],
                 description=row['description']
             ))
+        except Course.DoesNotExist:
+            with open(invalid_log_path, 'a') as log_file:
+                log_file.write(f"Invalid Course ID for content: {row}\n")
+
     CourseContent.objects.bulk_create(obj_create)
 
 # Import Comments
@@ -84,20 +120,28 @@ with open(filepath + 'comments.json') as jsonfile:
             if int(row['user_id']) > 50:
                 row['user_id'] = randint(5, 40)
 
-            user = User.objects.get(pk=int(row['user_id']))
-            course_content = CourseContent.objects.get(pk=int(row['content_id']))
-            course_member = CourseMember.objects.filter(user_id=user, course_id=course_content.course_id).first()
+            try:
+                user = User.objects.get(pk=int(row['user_id']))
+                course_content = CourseContent.objects.get(pk=int(row['content_id']))
+                course_member = CourseMember.objects.filter(user_id=user, course_id=course_content.course_id).first()
 
-            if not course_member:
-                log_file.write(f"user_id={row['user_id']}, course_id={course_content.course_id}\n")
-                continue
+                if not course_member:
+                    log_file.write(f"user_id={row['user_id']}, course_id={course_content.course_id}\n")
+                    continue
 
-            if not Comment.objects.filter(content_id=course_content, member_id=course_member).exists():
-                obj_create.append(Comment(
-                    content_id=course_content,
-                    member_id=course_member,
-                    comment=row['comment']
-                ))
+                if not Comment.objects.filter(content_id=course_content, member_id=course_member).exists():
+                    obj_create.append(Comment(
+                        content_id=course_content,
+                        member_id=course_member,
+                        comment=row['comment']
+                    ))
+            except User.DoesNotExist:
+                with open(invalid_log_path, 'a') as log_file:
+                    log_file.write(f"Invalid User ID for comment: {row}\n")
+            except CourseContent.DoesNotExist:
+                with open(invalid_log_path, 'a') as log_file:
+                    log_file.write(f"Invalid Course Content ID for comment: {row}\n")
+
     Comment.objects.bulk_create(obj_create)
 
 print("--- %s seconds ---" % (time.time() - start_time))
